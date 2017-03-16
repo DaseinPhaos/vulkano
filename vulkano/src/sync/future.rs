@@ -26,23 +26,24 @@ use device::Queue;
 use image::Image;
 use swapchain::Swapchain;
 use swapchain::PresentFuture;
+use sync::AccessFlagBits;
 use sync::Fence;
 use sync::FenceWaitError;
+use sync::PipelineStages;
 use sync::Semaphore;
 
-use SafeDeref;
 use VulkanObject;
 
 /// Represents an event that will happen on the GPU in the future.
+// TODO: unsound if put inside an Arc
 pub unsafe trait GpuFuture: DeviceOwned {
-    /// Returns `true` if the event happened on the GPU.
+    /// If possible, checks whether the submission has finished. If so, gives up ownership of the
+    /// resources used by these submissions.
     ///
-    /// If this returns `false`, then the destuctor of this future will block until it is the case.
-    ///
-    /// If you didn't call `flush()` yet, then this function will return `false`.
-    // TODO: what if user submits a cb without fence, calls flush, and then calls is_finished()
-    // expecting it to return true eventually?
-    fn is_finished(&self) -> bool;
+    /// It is highly recommended to call `cleanup_finished` from time to time. Doing so will
+    /// prevent memory usage from increasing over time, and will also destroy the locks on 
+    /// resources used by the GPU.
+    fn cleanup_finished(&mut self);
 
     /// Builds a submission that, if submitted, makes sure that the event represented by this
     /// `GpuFuture` will happen, and possibly contains extra elements (eg. a semaphore wait or an
@@ -85,16 +86,31 @@ pub unsafe trait GpuFuture: DeviceOwned {
 
     /// Checks whether submitting something after this future grants access (exclusive or shared,
     /// depending on the parameter) to the given buffer on the given queue.
-    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue) -> bool;
+    ///
+    /// If the access is granted, returns the pipeline stage and access flags of the latest usage
+    /// of this resource, or `None` if irrelevant.
+    ///
+    /// > **Note**: Returning `Ok` means "access granted", while returning `Err` means
+    /// > "don't know". Therefore returning `Err` is never unsafe.
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>;
 
     /// Checks whether submitting something after this future grants access (exclusive or shared,
     /// depending on the parameter) to the given image on the given queue.
     ///
+    /// If the access is granted, returns the pipeline stage and access flags of the latest usage
+    /// of this resource, or `None` if irrelevant.
+    ///
+    /// > **Note**: Returning `Ok` means "access granted", while returning `Err` means
+    /// > "don't know". Therefore returning `Err` is never unsafe.
+    ///
     /// > **Note**: Keep in mind that changing the layout of an image also requires exclusive
     /// > access.
-    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue) -> bool;
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                         -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>;
 
     /// Joins this future with another one, representing the moment when both events have happened.
+    // TODO: handle errors
     fn join<F>(self, other: F) -> JoinFuture<Self, F>
         where Self: Sized, F: GpuFuture
     {
@@ -157,7 +173,7 @@ pub unsafe trait GpuFuture: DeviceOwned {
         assert!(self.queue().is_some());        // TODO: document
 
         FenceSignalFuture {
-            previous: self,
+            previous: Some(self),
             fence: Fence::new(device).unwrap(),
             flushed: Mutex::new(false),
         }
@@ -178,10 +194,11 @@ pub unsafe trait GpuFuture: DeviceOwned {
     }
 }
 
-unsafe impl<T> GpuFuture for T where T: SafeDeref, T::Target: GpuFuture {
+// TODO: can't implement on SafeDeref because cleanup_finished takes by mut ; is this a problem?
+unsafe impl<F: ?Sized> GpuFuture for Box<F> where F: GpuFuture {
     #[inline]
-    fn is_finished(&self) -> bool {
-        (**self).is_finished()
+    fn cleanup_finished(&mut self) {
+        (**self).cleanup_finished()
     }
 
     #[inline]
@@ -210,12 +227,16 @@ unsafe impl<T> GpuFuture for T where T: SafeDeref, T::Target: GpuFuture {
     }
 
     #[inline]
-    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue) -> bool {
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
         (**self).check_buffer_access(buffer, exclusive, queue)
     }
 
     #[inline]
-    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue) -> bool {
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
         (**self).check_image_access(image, exclusive, queue)
     }
 }
@@ -238,8 +259,7 @@ impl DummyFuture {
 
 unsafe impl GpuFuture for DummyFuture {
     #[inline]
-    fn is_finished(&self) -> bool {
-        true
+    fn cleanup_finished(&mut self) {
     }
 
     #[inline]
@@ -267,13 +287,17 @@ unsafe impl GpuFuture for DummyFuture {
     }
 
     #[inline]
-    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue) -> bool {
-        false
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        Err(())
     }
 
     #[inline]
-    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue) -> bool {
-        false
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        Err(())
     }
 }
 
@@ -298,8 +322,8 @@ pub struct SemaphoreSignalFuture<F> where F: GpuFuture {
 
 unsafe impl<F> GpuFuture for SemaphoreSignalFuture<F> where F: GpuFuture {
     #[inline]
-    fn is_finished(&self) -> bool {
-        self.finished.load(Ordering::SeqCst)
+    fn cleanup_finished(&mut self) {
+        self.previous.cleanup_finished();
     }
 
     #[inline]
@@ -370,13 +394,17 @@ unsafe impl<F> GpuFuture for SemaphoreSignalFuture<F> where F: GpuFuture {
     }
 
     #[inline]
-    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue) -> bool {
-        self.previous.check_buffer_access(buffer, exclusive, queue)
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        self.previous.check_buffer_access(buffer, exclusive, queue).map(|_| None)
     }
 
     #[inline]
-    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue) -> bool {
-        self.previous.check_image_access(image, exclusive, queue)
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        self.previous.check_image_access(image, exclusive, queue).map(|_| None)
     }
 }
 
@@ -404,7 +432,7 @@ impl<F> Drop for SemaphoreSignalFuture<F> where F: GpuFuture {
 /// Represents a fence being signaled after a previous event.
 #[must_use = "Dropping this object will immediately block the thread until the GPU has finished processing the submission"]
 pub struct FenceSignalFuture<F> where F: GpuFuture {
-    previous: F,
+    previous: Option<F>,
     fence: Fence,
     // True if the signaling command has already been submitted.
     // If flush is called multiple times, we want to block so that only one flushing is executed.
@@ -412,23 +440,16 @@ pub struct FenceSignalFuture<F> where F: GpuFuture {
     flushed: Mutex<bool>,
 }
 
-impl<F> FenceSignalFuture<F> where F: GpuFuture {
-    /// Waits until the fence is signaled, or at least until the number of nanoseconds of the
-    /// timeout has elapsed.
-    pub fn wait(&self, timeout: Duration) -> Result<(), FenceWaitError> {
-        // FIXME: flush?
-        self.fence.wait(timeout)
-    }
-}
-
 unsafe impl<F> GpuFuture for FenceSignalFuture<F> where F: GpuFuture {
     #[inline]
-    fn is_finished(&self) -> bool {
+    fn cleanup_finished(&mut self) {
         if !*self.flushed.lock().unwrap() {
-            return false;
+            return;
         }
 
-        self.fence.wait(Duration::from_secs(0)).is_ok()
+        if self.fence.wait(Duration::from_secs(0)).is_ok() {
+            self.previous = None;
+        }
     }
 
     #[inline]
@@ -446,10 +467,13 @@ unsafe impl<F> GpuFuture for FenceSignalFuture<F> where F: GpuFuture {
             if *flushed {
                 return Ok(());
             }
-            
-            let queue = self.previous.queue().unwrap().clone();
 
-            match try!(self.previous.build_submission()) {
+            // `previous` can only be `None` if the future has already been flushed and cleaned up
+            // earlier.
+            debug_assert!(self.previous.is_some());
+            let queue = self.previous.as_ref().unwrap().queue().unwrap().clone();
+
+            match try!(self.previous.as_ref().unwrap().build_submission()) {
                 SubmitAnyBuilder::Empty => {
                     let mut b = SubmitCommandBufferBuilder::new();
                     b.set_fence_signal(&self.fence);
@@ -482,7 +506,9 @@ unsafe impl<F> GpuFuture for FenceSignalFuture<F> where F: GpuFuture {
     #[inline]
     unsafe fn signal_finished(&self) {
         debug_assert!(*self.flushed.lock().unwrap());
-        self.previous.signal_finished();
+        if let Some(ref previous) = self.previous {
+            previous.signal_finished();
+        }
     }
 
     #[inline]
@@ -492,17 +518,27 @@ unsafe impl<F> GpuFuture for FenceSignalFuture<F> where F: GpuFuture {
 
     #[inline]
     fn queue(&self) -> Option<&Arc<Queue>> {
-        self.previous.queue()
+        self.previous.as_ref().and_then(|p| p.queue())
     }
 
     #[inline]
-    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue) -> bool {
-        self.previous.check_buffer_access(buffer, exclusive, queue)
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()> {
+        if let Some(ref previous) = self.previous {
+            previous.check_buffer_access(buffer, exclusive, queue)
+        } else {
+            Err(())
+        }
     }
 
     #[inline]
-    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue) -> bool {
-        self.previous.check_image_access(image, exclusive, queue)
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()> {
+        if let Some(ref previous) = self.previous {
+            previous.check_image_access(image, exclusive, queue)
+        } else {
+            Err(())
+        }
     }
 }
 
@@ -519,7 +555,9 @@ impl<F> Drop for FenceSignalFuture<F> where F: GpuFuture {
         self.fence.wait(Duration::from_secs(600)).unwrap();     // TODO: handle some errors
 
         unsafe {
-            self.previous.signal_finished();
+            if let Some(ref previous) = self.previous {
+                previous.signal_finished();
+            }
         }
     }
 }
@@ -542,8 +580,9 @@ unsafe impl<A, B> DeviceOwned for JoinFuture<A, B> where A: DeviceOwned, B: Devi
 
 unsafe impl<A, B> GpuFuture for JoinFuture<A, B> where A: GpuFuture, B: GpuFuture {
     #[inline]
-    fn is_finished(&self) -> bool {
-        self.first.is_finished() && self.second.is_finished()
+    fn cleanup_finished(&mut self) {
+        self.first.cleanup_finished();
+        self.second.cleanup_finished();
     }
 
     #[inline]
@@ -567,7 +606,38 @@ unsafe impl<A, B> GpuFuture for JoinFuture<A, B> where A: GpuFuture, B: GpuFutur
                 a.merge(b);
                 SubmitAnyBuilder::SemaphoresWait(a)
             },
-            _ => unimplemented!()
+            (SubmitAnyBuilder::SemaphoresWait(a), SubmitAnyBuilder::CommandBuffer(b)) => {
+                try!(b.submit(&self.second.queue().clone().unwrap()));
+                SubmitAnyBuilder::SemaphoresWait(a)
+            },
+            (SubmitAnyBuilder::CommandBuffer(a), SubmitAnyBuilder::SemaphoresWait(b)) => {
+                try!(a.submit(&self.first.queue().clone().unwrap()));
+                SubmitAnyBuilder::SemaphoresWait(b)
+            },
+            (SubmitAnyBuilder::SemaphoresWait(a), SubmitAnyBuilder::QueuePresent(b)) => {
+                try!(b.submit(&self.second.queue().clone().unwrap()));
+                SubmitAnyBuilder::SemaphoresWait(a)
+            },
+            (SubmitAnyBuilder::QueuePresent(a), SubmitAnyBuilder::SemaphoresWait(b)) => {
+                try!(a.submit(&self.first.queue().clone().unwrap()));
+                SubmitAnyBuilder::SemaphoresWait(b)
+            },
+            (SubmitAnyBuilder::CommandBuffer(a), SubmitAnyBuilder::CommandBuffer(b)) => {
+                // TODO: we may want to add debug asserts here
+                let new = a.merge(b);
+                SubmitAnyBuilder::CommandBuffer(new)
+            },
+            (SubmitAnyBuilder::QueuePresent(a), SubmitAnyBuilder::QueuePresent(b)) => {
+                try!(a.submit(&self.first.queue().clone().unwrap()));
+                try!(b.submit(&self.second.queue().clone().unwrap()));
+                SubmitAnyBuilder::Empty
+            },
+            (SubmitAnyBuilder::CommandBuffer(a), SubmitAnyBuilder::QueuePresent(b)) => {
+                unimplemented!()
+            },
+            (SubmitAnyBuilder::QueuePresent(a), SubmitAnyBuilder::CommandBuffer(b)) => {
+                unimplemented!()
+            },
         })
     }
 
@@ -601,20 +671,42 @@ unsafe impl<A, B> GpuFuture for JoinFuture<A, B> where A: GpuFuture, B: GpuFutur
     }
 
     #[inline]
-    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue) -> bool {
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
         let first = self.first.check_buffer_access(buffer, exclusive, queue);
         let second = self.second.check_buffer_access(buffer, exclusive, queue);
-        debug_assert!(!exclusive || !(first && second), "Two futures gave exclusive access to the \
-                                                         same resource");
-        first || second
+        debug_assert!(!exclusive || !(first.is_ok() && second.is_ok()), "Two futures gave \
+                                                                         exclusive access to the \
+                                                                         same resource");
+        match (first, second) {
+            (Ok(v), Err(_)) | (Err(_), Ok(v)) => Ok(v),
+            (Err(()), Err(())) => Err(()),
+            (Ok(None), Ok(None)) => Ok(None),
+            (Ok(Some(a)), Ok(None)) | (Ok(None), Ok(Some(a))) => Ok(Some(a)),
+            (Ok(Some((a1, a2))), Ok(Some((b1, b2)))) => {
+                Ok(Some((a1 | b1, a2 | b2)))
+            },
+        }
     }
 
     #[inline]
-    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue) -> bool {
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
         let first = self.first.check_image_access(image, exclusive, queue);
         let second = self.second.check_image_access(image, exclusive, queue);
-        debug_assert!(!exclusive || !(first && second), "Two futures gave exclusive access to the \
-                                                         same resource");
-        first || second
+        debug_assert!(!exclusive || !(first.is_ok() && second.is_ok()), "Two futures gave \
+                                                                         exclusive access to the \
+                                                                         same resource");
+        match (first, second) {
+            (Ok(v), Err(_)) | (Err(_), Ok(v)) => Ok(v),
+            (Err(()), Err(())) => Err(()),
+            (Ok(None), Ok(None)) => Ok(None),
+            (Ok(Some(a)), Ok(None)) | (Ok(None), Ok(Some(a))) => Ok(Some(a)),
+            (Ok(Some((a1, a2))), Ok(Some((b1, b2)))) => {
+                Ok(Some((a1 | b1, a2 | b2)))
+            },
+        }
     }
 }

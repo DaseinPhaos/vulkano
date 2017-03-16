@@ -66,7 +66,7 @@ impl<F> ImmutableImage<F> {
             };
 
             try!(UnsafeImage::new(device, &usage, format.format(), dimensions.to_image_dimensions(),
-                                  1, 1, Sharing::Exclusive::<Empty<u32>>, false, false))
+                                  1, 1, sharing, false, false))
         };
 
         let mem_ty = {
@@ -118,8 +118,13 @@ unsafe impl<F, A> Image for ImmutableImage<F, A> where F: 'static + Send + Sync,
     }
 
     #[inline]
-    fn gpu_access(&self, exclusive_access: bool, queue: &Queue) -> bool {
-        false       // FIXME:
+    fn try_gpu_lock(&self, exclusive_access: bool, queue: &Queue) -> bool {
+        true        // FIXME:
+    }
+
+    #[inline]
+    unsafe fn increase_gpu_lock(&self) {
+        // FIXME:
     }
 }
 

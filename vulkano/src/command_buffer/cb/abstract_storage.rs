@@ -11,6 +11,7 @@ use std::any::Any;
 use std::error::Error;
 use std::sync::Arc;
 
+use buffer::Buffer;
 use command_buffer::cb::AddCommand;
 use command_buffer::cb::CommandBufferBuild;
 use command_buffer::cb::UnsafeCommandBuffer;
@@ -20,6 +21,10 @@ use command_buffer::CommandBufferBuilder;
 use device::Device;
 use device::DeviceOwned;
 use device::Queue;
+use image::Image;
+use sync::AccessFlagBits;
+use sync::GpuFuture;
+use sync::PipelineStages;
 
 /// Layer that stores commands in an abstract way.
 pub struct AbstractStorageLayer<I> {
@@ -44,6 +49,25 @@ unsafe impl<I> CommandBuffer for AbstractStorageLayer<I> where I: CommandBuffer 
     #[inline]
     fn inner(&self) -> &UnsafeCommandBuffer<I::Pool> {
         self.inner.inner()
+    }
+
+    #[inline]
+    fn submit_check(&self, future: &GpuFuture, queue: &Queue) -> Result<(), Box<Error>> {
+        self.inner.submit_check(future, queue)
+    }
+
+    #[inline]
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        self.inner.check_buffer_access(buffer, exclusive, queue)
+    }
+
+    #[inline]
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        self.inner.check_image_access(image, exclusive, queue)
     }
 }
 
@@ -117,4 +141,4 @@ pass_through!((Pc, Pl), cmd::CmdPushConstants<Pc, Pl>);
 pass_through!((S, D), cmd::CmdResolveImage<S, D>);
 pass_through!((), cmd::CmdSetEvent);
 pass_through!((), cmd::CmdSetState);
-pass_through!((B, D), cmd::CmdUpdateBuffer<'static, B, D>);
+pass_through!((B, D), cmd::CmdUpdateBuffer<B, D>);

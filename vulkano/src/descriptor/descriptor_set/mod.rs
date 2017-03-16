@@ -35,7 +35,9 @@
 //! - The `DescriptorSetsCollection` trait is implemented on collections of types that implement
 //!   `DescriptorSet`. It is what you pass to the draw functions.
 
+use buffer::Buffer;
 use descriptor::descriptor::DescriptorDesc;
+use image::Image;
 use SafeDeref;
 
 pub use self::collection::DescriptorSetsCollection;
@@ -62,9 +64,17 @@ mod unsafe_layout;
 /// Trait for objects that contain a collection of resources that will be accessible by shaders.
 ///
 /// Objects of this type can be passed when submitting a draw command.
-pub unsafe trait DescriptorSet {
+pub unsafe trait DescriptorSet: DescriptorSetDesc {
     /// Returns the inner `UnsafeDescriptorSet`.
     fn inner(&self) -> &UnsafeDescriptorSet;
+
+    /// Returns the list of buffers used by this descriptor set. Includes buffer views.
+    // TODO: meh for boxing
+    fn buffers_list<'a>(&'a self) -> Box<Iterator<Item = &'a Buffer> + 'a>;
+
+    /// Returns the list of images used by this descriptor set. Includes image views.
+    // TODO: meh for boxing
+    fn images_list<'a>(&'a self) -> Box<Iterator<Item = &'a Image> + 'a>;
 }
 
 unsafe impl<T> DescriptorSet for T where T: SafeDeref, T::Target: DescriptorSet {
@@ -72,22 +82,35 @@ unsafe impl<T> DescriptorSet for T where T: SafeDeref, T::Target: DescriptorSet 
     fn inner(&self) -> &UnsafeDescriptorSet {
         (**self).inner()
     }
+
+    #[inline]
+    fn buffers_list<'a>(&'a self) -> Box<Iterator<Item = &'a Buffer> + 'a> {
+        (**self).buffers_list()
+    }
+
+    #[inline]
+    fn images_list<'a>(&'a self) -> Box<Iterator<Item = &'a Image> + 'a> {
+        (**self).images_list()
+    }
 }
 
 /// Trait for objects that describe the layout of the descriptors of a set.
 pub unsafe trait DescriptorSetDesc {
-    /// Iterator that describes individual descriptors.
-    type Iter: ExactSizeIterator<Item = DescriptorDesc>;
+    /// Returns the number of binding slots in the set.
+    fn num_bindings(&self) -> usize;
 
-    /// Describes the layout of the descriptors of the pipeline.
-    fn desc(&self) -> Self::Iter;
+    /// Returns a description of a descriptor, or `None` if out of range.
+    fn descriptor(&self, binding: usize) -> Option<DescriptorDesc>;
 }
 
 unsafe impl<T> DescriptorSetDesc for T where T: SafeDeref, T::Target: DescriptorSetDesc {
-    type Iter = <T::Target as DescriptorSetDesc>::Iter;
+    #[inline]
+    fn num_bindings(&self) -> usize {
+        (**self).num_bindings()
+    }
 
     #[inline]
-    fn desc(&self) -> Self::Iter {
-        (**self).desc()
+    fn descriptor(&self, binding: usize) -> Option<DescriptorDesc> {
+        (**self).descriptor(binding)
     }
 }

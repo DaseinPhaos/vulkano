@@ -11,8 +11,10 @@ use std::sync::Arc;
 
 use buffer::Buffer;
 use buffer::BufferViewRef;
+use descriptor::descriptor::DescriptorDesc;
 use descriptor::descriptor::DescriptorType;
 use descriptor::descriptor_set::DescriptorSet;
+use descriptor::descriptor_set::DescriptorSetDesc;
 use descriptor::descriptor_set::UnsafeDescriptorSetLayout;
 use descriptor::descriptor_set::DescriptorPool;
 use descriptor::descriptor_set::DescriptorPoolAlloc;
@@ -22,6 +24,7 @@ use descriptor::descriptor_set::StdDescriptorPool;
 use descriptor::pipeline_layout::PipelineLayoutAbstract;
 use device::Device;
 use device::DeviceOwned;
+use image::Image;
 use image::ImageView;
 use image::sys::Layout;
 use sampler::Sampler;
@@ -63,6 +66,28 @@ unsafe impl<R, P> DescriptorSet for SimpleDescriptorSet<R, P> where P: Descripto
     fn inner(&self) -> &UnsafeDescriptorSet {
         self.inner.inner()
     }
+
+    #[inline]
+    fn buffers_list<'a>(&'a self) -> Box<Iterator<Item = &'a Buffer> + 'a> {
+        unimplemented!()
+    }
+
+    #[inline]
+    fn images_list<'a>(&'a self) -> Box<Iterator<Item = &'a Image> + 'a> {
+        unimplemented!()
+    }
+}
+
+unsafe impl<R, P> DescriptorSetDesc for SimpleDescriptorSet<R, P> where P: DescriptorPool {
+    #[inline]
+    fn num_bindings(&self) -> usize {
+        unimplemented!()        // FIXME:
+    }
+
+    #[inline]
+    fn descriptor(&self, binding: usize) -> Option<DescriptorDesc> {
+        unimplemented!()        // FIXME:
+    }
 }
 
 /// Builds a descriptor set in the form of a `SimpleDescriptorSet` object.
@@ -70,8 +95,11 @@ unsafe impl<R, P> DescriptorSet for SimpleDescriptorSet<R, P> where P: Descripto
 #[macro_export]
 macro_rules! simple_descriptor_set {
     ($layout:expr, $set_num:expr, {$($name:ident: $val:expr),*$(,)*}) => ({
+        #[allow(unused_imports)]
         use $crate::descriptor::descriptor_set::SimpleDescriptorSetBuilder;
+        #[allow(unused_imports)]
         use $crate::descriptor::descriptor_set::SimpleDescriptorSetBufferExt;
+        #[allow(unused_imports)]
         use $crate::descriptor::descriptor_set::SimpleDescriptorSetImageExt;
 
         // We build an empty `SimpleDescriptorSetBuilder` struct, then adds each element one by

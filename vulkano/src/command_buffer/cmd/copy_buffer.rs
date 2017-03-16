@@ -10,11 +10,13 @@
 use std::cmp;
 use std::error;
 use std::fmt;
+use std::sync::Arc;
 
 use buffer::Buffer;
 use command_buffer::cb::AddCommand;
 use command_buffer::cb::UnsafeCommandBufferBuilder;
 use command_buffer::pool::CommandPool;
+use device::Device;
 use device::DeviceOwned;
 use VulkanObject;
 use VulkanPointers;
@@ -84,6 +86,29 @@ impl<S, D> CmdCopyBuffer<S, D>
             dst_offset: dst_offset as u64,
             size: size as u64,
         })
+    }
+}
+
+impl<S, D> CmdCopyBuffer<S, D> {
+    /// Returns the source buffer.
+    #[inline]
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
+    /// Returns the destination buffer.
+    #[inline]
+    pub fn destination(&self) -> &D {
+        &self.destination
+    }
+}
+
+unsafe impl<S, D> DeviceOwned for CmdCopyBuffer<S, D>
+    where S: DeviceOwned
+{
+    #[inline]
+    fn device(&self) -> &Arc<Device> {
+        self.source.device()
     }
 }
 

@@ -39,8 +39,10 @@ use swapchain::PresentMode;
 use swapchain::Surface;
 use swapchain::SurfaceTransform;
 use swapchain::SurfaceSwapchainLock;
+use sync::AccessFlagBits;
 use sync::Fence;
 use sync::GpuFuture;
+use sync::PipelineStages;
 use sync::Semaphore;
 use sync::SharingMode;
 
@@ -324,7 +326,7 @@ impl Swapchain {
         // Normally if `check_image_access` returns false we're supposed to call the `gpu_access`
         // function on the image instead. But since we know that this method on `SwapchainImage`
         // always returns false anyway (by design), we don't need to do it.
-        assert!(before.check_image_access(&swapchain_image, true, &queue));         // TODO: return error isntead
+        assert!(before.check_image_access(&swapchain_image, true, &queue).is_ok());         // TODO: return error instead
 
         PresentFuture {
             previous: before,
@@ -445,8 +447,7 @@ impl SwapchainAcquireFuture {
 
 unsafe impl GpuFuture for SwapchainAcquireFuture {
     #[inline]
-    fn is_finished(&self) -> bool {
-        self.finished.load(Ordering::SeqCst)
+    fn cleanup_finished(&mut self) {
     }
 
     #[inline]
@@ -477,16 +478,24 @@ unsafe impl GpuFuture for SwapchainAcquireFuture {
     }
 
     #[inline]
-    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue) -> bool {
-        false
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        Err(())
     }
 
     #[inline]
-    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue) -> bool {
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
         if let Some(sc_img) = self.image.upgrade() {
-            sc_img.inner().internal_object() == image.inner().internal_object()
+            if sc_img.inner().internal_object() == image.inner().internal_object() {
+                Ok(None)
+            } else {
+                Err(())
+            }
         } else {
-            false
+            Err(())
         }
     }
 }
@@ -595,8 +604,8 @@ pub struct PresentFuture<P> where P: GpuFuture {
 
 unsafe impl<P> GpuFuture for PresentFuture<P> where P: GpuFuture {
     #[inline]
-    fn is_finished(&self) -> bool {
-        self.finished.load(Ordering::SeqCst)
+    fn cleanup_finished(&mut self) {
+        self.previous.cleanup_finished();
     }
 
     #[inline]
@@ -660,12 +669,16 @@ unsafe impl<P> GpuFuture for PresentFuture<P> where P: GpuFuture {
     }
 
     #[inline]
-    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue) -> bool {
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
         unimplemented!()        // TODO: VK specs don't say whether it is legal to do that
     }
 
     #[inline]
-    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue) -> bool {
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
         unimplemented!()        // TODO: VK specs don't say whether it is legal to do that
     }
 }

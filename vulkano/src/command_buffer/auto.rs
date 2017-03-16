@@ -7,8 +7,10 @@
 // notice may not be copied, modified, or distributed except
 // according to those terms.
 
+use std::error;
 use std::sync::Arc;
 
+use buffer::Buffer;
 use command_buffer::cb;
 use command_buffer::cmd;
 use command_buffer::cb::AddCommand;
@@ -20,7 +22,12 @@ use command_buffer::pool::CommandPool;
 use command_buffer::pool::StandardCommandPool;
 use device::Device;
 use device::DeviceOwned;
+use device::Queue;
+use image::Image;
 use instance::QueueFamily;
+use sync::AccessFlagBits;
+use sync::PipelineStages;
+use sync::GpuFuture;
 use OomError;
 
 type Cb<P> = cb::DeviceCheckLayer<cb::QueueTyCheckLayer<cb::ContextCheckLayer<cb::StateCacheLayer<cb::SubmitSyncBuilderLayer<cb::AutoPipelineBarriersLayer<cb::AbstractStorageLayer<cb::UnsafeCommandBufferBuilder<P>>>>>>>>;
@@ -76,6 +83,25 @@ unsafe impl<P> CommandBuffer for AutoCommandBufferBuilder<P>
     fn inner(&self) -> &UnsafeCommandBuffer<Self::Pool> {
         self.inner.inner()
     }
+
+    #[inline]
+    fn submit_check(&self, future: &GpuFuture, queue: &Queue) -> Result<(), Box<error::Error>> {
+        self.inner.submit_check(future, queue)
+    }
+
+    #[inline]
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        self.inner.check_buffer_access(buffer, exclusive, queue)
+    }
+
+    #[inline]
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        self.inner.check_image_access(image, exclusive, queue)
+    }
 }
 
 unsafe impl<P> DeviceOwned for AutoCommandBufferBuilder<P>
@@ -127,4 +153,4 @@ pass_through!((B), cmd::CmdFillBuffer<B>);
 pass_through!((), cmd::CmdNextSubpass);
 pass_through!((Pc, Pl), cmd::CmdPushConstants<Pc, Pl>);
 pass_through!((), cmd::CmdSetState);
-//pass_through!((B), cmd::CmdUpdateBuffer<B>);
+pass_through!((B, D), cmd::CmdUpdateBuffer<B, D>);

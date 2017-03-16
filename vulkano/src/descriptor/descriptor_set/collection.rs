@@ -7,10 +7,13 @@
 // notice may not be copied, modified, or distributed except
 // according to those terms.
 
+use std::iter;
+use buffer::Buffer;
 use descriptor::descriptor::DescriptorDesc;
 use descriptor::descriptor_set::DescriptorSet;
 use descriptor::descriptor_set::DescriptorSetDesc;
 use descriptor::descriptor_set::UnsafeDescriptorSet;
+use image::Image;
 
 /// A collection of descriptor set objects.
 pub unsafe trait DescriptorSetsCollection {
@@ -31,6 +34,12 @@ pub unsafe trait DescriptorSetsCollection {
     ///
     /// Returns `None` if out of range.
     fn descriptor(&self, set: usize, binding: usize) -> Option<DescriptorDesc>;
+
+    /// Returns the list of buffers used by this descriptor set. Includes buffer views.
+    fn buffers_list<'a>(&'a self) -> Box<Iterator<Item = &'a Buffer> + 'a>;
+
+    /// Returns the list of images used by this descriptor set. Includes image views.
+    fn images_list<'a>(&'a self) -> Box<Iterator<Item = &'a Image> + 'a>;
 }
 
 unsafe impl DescriptorSetsCollection for () {
@@ -53,6 +62,16 @@ unsafe impl DescriptorSetsCollection for () {
     fn descriptor(&self, set: usize, binding: usize) -> Option<DescriptorDesc> {
         None
     }
+
+    #[inline]
+    fn buffers_list<'a>(&'a self) -> Box<Iterator<Item = &'a Buffer> + 'a> {
+        Box::new(iter::empty())
+    }
+
+    #[inline]
+    fn images_list<'a>(&'a self) -> Box<Iterator<Item = &'a Image> + 'a> {
+        Box::new(iter::empty())
+    }
 }
 
 unsafe impl<T> DescriptorSetsCollection for T
@@ -73,12 +92,28 @@ unsafe impl<T> DescriptorSetsCollection for T
 
     #[inline]
     fn num_bindings_in_set(&self, set: usize) -> Option<usize> {
-        unimplemented!()
+        match set {
+            0 => Some(self.num_bindings()),
+            _ => None
+        }
     }
 
     #[inline]
     fn descriptor(&self, set: usize, binding: usize) -> Option<DescriptorDesc> {
-        unimplemented!()
+        match set {
+            0 => self.descriptor(binding),
+            _ => None
+        }
+    }
+
+    #[inline]
+    fn buffers_list<'a>(&'a self) -> Box<Iterator<Item = &'a Buffer> + 'a> {
+        DescriptorSet::buffers_list(self)
+    }
+
+    #[inline]
+    fn images_list<'a>(&'a self) -> Box<Iterator<Item = &'a Image> + 'a> {
+        DescriptorSet::images_list(self)
     }
 }
 
@@ -116,13 +151,71 @@ macro_rules! impl_collection {
             }
 
             #[inline]
-            fn num_bindings_in_set(&self, set: usize) -> Option<usize> {
-                unimplemented!()
+            fn num_bindings_in_set(&self, mut set: usize) -> Option<usize> {
+                #![allow(non_snake_case)]
+                #![allow(unused_mut)]       // For the `set` parameter.
+
+                if set == 0 {
+                    return Some(self.0.num_bindings());
+                }
+
+                let &(_, $(ref $others,)*) = self;
+
+                $(
+                    set -= 1;
+                    if set == 0 {
+                        return Some($others.num_bindings());
+                    }
+                )*
+
+                None
             }
 
             #[inline]
-            fn descriptor(&self, set: usize, binding: usize) -> Option<DescriptorDesc> {
-                unimplemented!()
+            fn descriptor(&self, mut set: usize, binding: usize) -> Option<DescriptorDesc> {
+                #![allow(non_snake_case)]
+                #![allow(unused_mut)]       // For the `set` parameter.
+
+                if set == 0 {
+                    return self.0.descriptor(binding);
+                }
+
+                let &(_, $(ref $others,)*) = self;
+
+                $(
+                    set -= 1;
+                    if set == 0 {
+                        return $others.descriptor(binding);
+                    }
+                )*
+
+                None
+            }
+
+            #[inline]
+            fn buffers_list<'a>(&'a self) -> Box<Iterator<Item = &'a Buffer> + 'a> {
+                #![allow(non_snake_case)]
+
+                let &(ref first, $(ref $others,)*) = self;
+                let mut output = Vec::new();
+                output.extend(first.buffers_list());
+                $(
+                    output.extend($others.buffers_list());
+                )*
+                Box::new(output.into_iter())
+            }
+
+            #[inline]
+            fn images_list<'a>(&'a self) -> Box<Iterator<Item = &'a Image> + 'a> {
+                #![allow(non_snake_case)]
+
+                let &(ref first, $(ref $others,)*) = self;
+                let mut output = Vec::new();
+                output.extend(first.images_list());
+                $(
+                    output.extend($others.images_list());
+                )*
+                Box::new(output.into_iter())
             }
         }
 

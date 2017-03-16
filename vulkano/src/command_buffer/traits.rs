@@ -22,8 +22,10 @@ use device::Device;
 use device::DeviceOwned;
 use device::Queue;
 use image::Image;
+use sync::AccessFlagBits;
 use sync::DummyFuture;
 use sync::GpuFuture;
+use sync::PipelineStages;
 use SafeDeref;
 use VulkanObject;
 
@@ -33,6 +35,14 @@ pub unsafe trait CommandBuffer: DeviceOwned {
 
     /// Returns the underlying `UnsafeCommandBuffer` of this command buffer.
     fn inner(&self) -> &UnsafeCommandBuffer<Self::Pool>;
+
+    /// Checks whether this command buffer is allowed to be submitted after the `future` and on
+    /// the given queue.
+    ///
+    /// **You should not call this function directly**, otherwise any further attempt to submit
+    /// will return a runtime error.
+    // TODO: better error
+    fn submit_check(&self, future: &GpuFuture, queue: &Queue) -> Result<(), Box<error::Error>>;
 
     /// Executes this command buffer on a queue.
     ///
@@ -66,6 +76,8 @@ pub unsafe trait CommandBuffer: DeviceOwned {
     {
         assert_eq!(self.device().internal_object(), future.device().internal_object());
 
+        self.submit_check(&future, &queue).expect("Forbidden");     // TODO: error
+
         if !future.queue_change_allowed() {
             assert!(future.queue().unwrap().is_same(&queue));
         }
@@ -79,6 +91,12 @@ pub unsafe trait CommandBuffer: DeviceOwned {
         }
     }
 
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>;
+
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>;
+
     // FIXME: lots of other methods
 }
 
@@ -88,6 +106,25 @@ unsafe impl<T> CommandBuffer for T where T: SafeDeref, T::Target: CommandBuffer 
     #[inline]
     fn inner(&self) -> &UnsafeCommandBuffer<Self::Pool> {
         (**self).inner()
+    }
+
+    #[inline]
+    fn submit_check(&self, future: &GpuFuture, queue: &Queue) -> Result<(), Box<error::Error>> {
+        (**self).submit_check(future, queue)
+    }
+
+    #[inline]
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        (**self).check_buffer_access(buffer, exclusive, queue)
+    }
+
+    #[inline]
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        (**self).check_image_access(image, exclusive, queue)
     }
 }
 
@@ -109,8 +146,8 @@ unsafe impl<F, Cb> GpuFuture for CommandBufferExecFuture<F, Cb>
     where F: GpuFuture, Cb: CommandBuffer
 {
     #[inline]
-    fn is_finished(&self) -> bool {
-        self.finished.load(Ordering::SeqCst)
+    fn cleanup_finished(&mut self) {
+        self.previous.cleanup_finished();
     }
 
     unsafe fn build_submission(&self) -> Result<SubmitAnyBuilder, Box<error::Error>> {
@@ -186,15 +223,23 @@ unsafe impl<F, Cb> GpuFuture for CommandBufferExecFuture<F, Cb>
     }
 
     #[inline]
-    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue) -> bool {
-        // FIXME: check the command buffer too
-        self.previous.check_buffer_access(buffer, exclusive, queue)
+    fn check_buffer_access(&self, buffer: &Buffer, exclusive: bool, queue: &Queue)
+                           -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        match self.command_buffer.check_buffer_access(buffer, exclusive, queue) {
+            Ok(v) => Ok(v),
+            Err(()) => self.previous.check_buffer_access(buffer, exclusive, queue),
+        }
     }
 
     #[inline]
-    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue) -> bool {
-        // FIXME: check the command buffer too
-        self.previous.check_image_access(image, exclusive, queue)
+    fn check_image_access(&self, image: &Image, exclusive: bool, queue: &Queue)
+                          -> Result<Option<(PipelineStages, AccessFlagBits)>, ()>
+    {
+        match self.command_buffer.check_image_access(image, exclusive, queue) {
+            Ok(v) => Ok(v),
+            Err(()) => self.previous.check_image_access(image, exclusive, queue),
+        }
     }
 }
 
